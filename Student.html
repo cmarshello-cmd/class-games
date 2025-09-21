@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WriteRound — Student</title>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#000; --bg:#fff; --edge:#e5e7eb; --accent:#98DCF3; }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:"Lexend",ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--ink); background:#fff;}
+  .app{width:min(900px,96vw); margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:16px;}
+  .box{border:1px solid var(--edge); border-radius:12px; padding:14px}
+  input, textarea{border:1px solid var(--edge); border-radius:10px; padding:10px 12px; background:#fff; color:#000; font-family:inherit}
+  button{border:1px solid var(--edge); background:#fff; color:#000; padding:10px 14px; font-size:16px; border-radius:999px; cursor:pointer}
+  button.primary{background:#98DCF3}
+  .muted{opacity:.7}
+  textarea{min-height:180px; resize:vertical; width:100%}
+  .prompt{font-size:clamp(18px,2.4vw,28px); margin:0}
+  .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="box">
+    <div class="row">
+      <label>Session Code <input id="code" placeholder="e.g., 6-letter code" /></label>
+      <label>Your Name <input id="name" placeholder="First name, or First + Last initial" /></label>
+      <button class="primary" onclick="join()">Join</button>
+    </div>
+    <p class="muted" style="margin:6px 0 0 0">Once joined, the current prompt will appear automatically when your teacher starts a round.</p>
+  </div>
+
+  <div id="status" class="box muted">Not connected.</div>
+
+  <div id="work" class="box" style="display:none;">
+    <h2 id="prompt" class="prompt"></h2>
+    <textarea id="text" placeholder="Write your response here..."></textarea>
+    <div class="row" style="margin-top:8px;">
+      <button id="submitBtn" class="primary" onclick="submitResponse()">Submit</button>
+      <button id="saveBtn" onclick="saveDraft()">Save Draft</button>
+      <span id="savedNote" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Firebase (v10) -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, collection, serverTimestamp, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+// ===== 1) PASTE YOUR FIREBASE CONFIG HERE =====
+const firebaseConfig = {
+apiKey: "AIzaSyBCn1-_WS-K3miWm-MRtKJAX8z3fceN6Js",
+  authDomain: "writingproject-3c731.firebaseapp.com",
+  projectId: "writingproject-3c731",
+  storageBucket: "writingproject-3c731.firebasestorage.app",
+  messagingSenderId: "710289717525",
+  appId: "1:710289717525:web:5d98074658ea76c776511c",
+  measurementId: "G-1Q5J906E8C"
+};
+// ==============================================
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+await signInAnonymously(auth);
+
+const codeEl = document.getElementById('code');
+const nameEl = document.getElementById('name');
+const statusEl = document.getElementById('status');
+const workEl = document.getElementById('work');
+const promptEl = document.getElementById('prompt');
+const textEl = document.getElementById('text');
+const savedNote = document.getElementById('savedNote');
+const submitBtn = document.getElementById('submitBtn');
+
+let sessionRef = null;
+let roundsCol = null;
+let currentRoundRef = null;
+let unsubSession = null;
+let unsubRound = null;
+
+function setStatus(msg){ statusEl.textContent = msg; }
+
+async function join(){
+  const code = codeEl.value.trim().toUpperCase();
+  const name = nameEl.value.trim();
+  if (!code || !name) { alert('Enter session code and your name.'); return; }
+  sessionRef = doc(db, 'sessions', code);
+  const s = await getDoc(sessionRef);
+  if (!s.exists()){ alert('Session not found. Check with your teacher.'); return; }
+  roundsCol = collection(sessionRef, 'rounds');
+  localStorage.setItem('wr_student', JSON.stringify({code, name}));
+  setStatus('Connected to session ' + code + '. Waiting for round...');
+
+  if (unsubSession) unsubSession();
+  unsubSession = onSnapshot(sessionRef, snap => {
+    const data = snap.data();
+    const activeId = data?.activeRound || null;
+    if (!activeId){
+      workEl.style.display = 'none';
+      setStatus('Waiting for the next round...');
+      if (unsubRound) { unsubRound(); unsubRound = null; }
+      return;
+    }
+    currentRoundRef = doc(roundsCol, activeId);
+    if (unsubRound) unsubRound();
+    unsubRound = onSnapshot(currentRoundRef, r => {
+      const rd = r.data();
+      if (!rd) return;
+      promptEl.textContent = rd.prompt || '';
+      workEl.style.display = 'block';
+      setStatus('Round in progress. Submit when ready.');
+      const myRef = doc(currentRoundRef, 'responses', auth.currentUser.uid);
+      getDoc(myRef).then(d => {
+        const dt = d.data();
+        if (dt && dt.text) textEl.value = dt.text;
+      });
+    });
+  });
+}
+
+async function submitResponse(){
+  if (!currentRoundRef) return alert('No active round yet.');
+  const text = textEl.value.trim();
+  if (!text) return alert('Write your response before submitting.');
+  const { uid } = auth.currentUser;
+  const saved = JSON.parse(localStorage.getItem('wr_student')||"{}");
+  const myRef = doc(currentRoundRef, 'responses', uid);
+  await setDoc(myRef, {
+    uid, name: saved.name || "", text, createdAt: serverTimestamp()
+  });
+  setStatus('Submitted! You can still edit until the round ends.');
+}
+
+function saveDraft(){
+  const t = textEl.value;
+  localStorage.setItem('wr_draft', t);
+  savedNote.textContent = 'Draft saved locally.';
+  setTimeout(()=> savedNote.textContent='', 1500);
+}
+
+const sv = JSON.parse(localStorage.getItem('wr_student')||"null");
+if (sv){ codeEl.value = sv.code||""; nameEl.value = sv.name||""; }
+const d = localStorage.getItem('wr_draft'); if (d) textEl.value = d;
+
+window.join = join;
+window.submitResponse = submitResponse;
+window.saveDraft = saveDraft;
+</script>
+</body>
+</html>

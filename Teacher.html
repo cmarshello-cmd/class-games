@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WriteRound — Teacher</title>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#000; --bg:#fff; --edge:#e5e7eb; --accent:#98DCF3; }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:"Lexend",ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:var(--ink); background:#fff;}
+  .app{width:min(1100px,96vw); margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:16px;}
+  .bar{position:sticky; top:0; background:#fff; z-index:10; padding:10px 0; border-bottom:1px solid var(--edge); display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+  button{border:1px solid var(--edge); background:#fff; color:#000; padding:10px 14px; font-size:16px; border-radius:999px; cursor:pointer}
+  button.primary{background:var(--accent)}
+  input, textarea{border:1px solid var(--edge); border-radius:10px; padding:10px 12px; background:#fff; color:#000; font-family:inherit}
+  input[type="number"]{width:120px}
+  .pill{padding:8px 10px; border:1px solid var(--edge); border-radius:999px; background:#f8fafc}
+  .stack{display:flex; flex-direction:column; gap:8px}
+  .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .stage{border:1px solid var(--edge); border-radius:12px; padding:14px}
+  .prompt{font-size:clamp(18px,2.4vw,28px); margin:6px 0 0 0}
+  .code{font-weight:700; letter-spacing:2px; font-size:clamp(22px,4vw,36px)}
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-top:10px}
+  .card{border:1px solid var(--edge); border-radius:12px; padding:12px; background:#fff}
+  .muted{opacity:.7}
+  .meter{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  .barfill{height:10px; background:var(--accent); border-radius:999px}
+  .barwrap{width:240px; background:#e5e7eb; border-radius:999px; overflow:hidden}
+  .note{font-size:12px; opacity:.7}
+  @media (max-width:800px){ .grid{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="bar">
+    <button onclick="newSession()">New Session</button>
+    <div class="pill">Session Code: <span id="sessionCode" class="code muted">—</span></div>
+    <label>Expected Students <input id="expected" type="number" min="1" value="25" /></label>
+    <button onclick="saveSession()">Save</button>
+    <button onclick="exportCSV()">Export CSV</button>
+    <label><input id="showNames" type="checkbox" /> Show names</label>
+  </div>
+
+  <div class="stage">
+    <div class="row">
+      <div class="stack" style="flex:1">
+        <label>Prompt for this round</label>
+        <input id="promptInput" placeholder="e.g., Describe a place that makes you feel calm..." />
+      </div>
+      <div class="stack">
+        <button class="primary" onclick="startRound()">Start Round</button>
+        <button onclick="endRound()">End Round</button>
+      </div>
+    </div>
+    <p class="muted note" style="margin:8px 0 0 0">Students go to the student link and enter the session code. Their names are hidden here but saved for export.</p>
+    <h2 id="prompt" class="prompt muted">No round active</h2>
+    <div class="meter">
+      <span>Submitted: <strong id="submitted">0</strong>/<strong id="expectedOut">0</strong></span>
+      <div class="barwrap"><div id="fill" class="barfill" style="width:0%"></div></div>
+      <span id="allDone" class="pill" style="display:none;">All responses in!</span>
+    </div>
+    <div id="responses" class="grid"></div>
+  </div>
+
+  <div class="stack">
+    <span class="note">Share this student page link: <code id="studentURL"></code></span>
+  </div>
+</div>
+
+<!-- Firebase (v10) -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, updateDoc, addDoc, collection, serverTimestamp, onSnapshot, query, orderBy, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+// ===== 1) PASTE YOUR FIREBASE CONFIG HERE =====
+const firebaseConfig = {
+apiKey: "AIzaSyBCn1-_WS-K3miWm-MRtKJAX8z3fceN6Js",
+  authDomain: "writingproject-3c731.firebaseapp.com",
+  projectId: "writingproject-3c731",
+  storageBucket: "writingproject-3c731.firebasestorage.app",
+  messagingSenderId: "710289717525",
+  appId: "1:710289717525:web:5d98074658ea76c776511c",
+  measurementId: "G-1Q5J906E8C"
+};
+// ==============================================
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+await signInAnonymously(auth);
+
+const sessionCodeEl = document.getElementById('sessionCode');
+const expectedEl = document.getElementById('expected');
+const expectedOutEl = document.getElementById('expectedOut');
+const promptEl = document.getElementById('prompt');
+const promptInput = document.getElementById('promptInput');
+const responsesEl = document.getElementById('responses');
+const submittedEl = document.getElementById('submitted');
+const fillEl = document.getElementById('fill');
+const showNamesEl = document.getElementById('showNames');
+const allDoneEl = document.getElementById('allDone');
+
+// For convenience, set student URL text
+document.getElementById('studentURL').textContent = location.href.replace('Teacher','Student');
+
+let sessionRef = null;
+let roundsCol = null;
+let activeRoundRef = null;
+let unsubRound = null;
+let unsubResponses = null;
+let expectedCount = 25;
+
+function randCode(){
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i=0;i<6;i++) s += chars[Math.floor(Math.random()*chars.length)];
+  return s;
+}
+
+async function newSession(){
+  const code = randCode();
+  sessionRef = doc(db, 'sessions', code);
+  await setDoc(sessionRef, { createdAt: serverTimestamp(), expectedCount: Number(expectedEl.value||25), activeRound: null });
+  roundsCol = collection(sessionRef, 'rounds');
+  sessionCodeEl.textContent = code;
+  sessionCodeEl.classList.remove('muted');
+  expectedOutEl.textContent = Number(expectedEl.value||25);
+  promptEl.textContent = 'No round active';
+  promptEl.classList.add('muted');
+  responsesEl.innerHTML='';
+  submittedEl.textContent = '0';
+  fillEl.style.width = '0%';
+  allDoneEl.style.display = 'none';
+  localStorage.setItem('wr_session', code);
+}
+
+async function loadSession(code){
+  sessionRef = doc(db, 'sessions', code);
+  const snap = await getDoc(sessionRef);
+  if (!snap.exists()){
+    alert('Session not found. Click New Session.');
+    return;
+  }
+  roundsCol = collection(sessionRef, 'rounds');
+  sessionCodeEl.textContent = code;
+  sessionCodeEl.classList.remove('muted');
+  expectedCount = snap.data().expectedCount || 25;
+  expectedEl.value = expectedCount;
+  expectedOutEl.textContent = expectedCount;
+  if (unsubRound) unsubRound();
+  unsubRound = onSnapshot(sessionRef, s => {
+    const data = s.data();
+    if (!data) return;
+    const activeId = data.activeRound;
+    if (!activeId){
+      promptEl.textContent = 'No round active';
+      promptEl.classList.add('muted');
+      responsesEl.innerHTML='';
+      submittedEl.textContent = '0';
+      fillEl.style.width = '0%';
+      allDoneEl.style.display = 'none';
+      if (unsubResponses) { unsubResponses(); unsubResponses = null; }
+      return;
+    }
+    activeRoundRef = doc(roundsCol, activeId);
+    onSnapshot(activeRoundRef, r => {
+      const rd = r.data();
+      if (!rd) return;
+      promptEl.textContent = 'Prompt: ' + rd.prompt;
+      promptEl.classList.remove('muted');
+    });
+    const respCol = collection(activeRoundRef, 'responses');
+    if (unsubResponses) unsubResponses();
+    unsubResponses = onSnapshot(query(respCol, orderBy('createdAt','asc')), qs => {
+      const docs = qs.docs.map(d => d.data());
+      responsesEl.innerHTML = '';
+      docs.forEach((d,i) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const who = showNamesEl.checked && d.name ? `<div class="muted" style="font-size:12px;margin-bottom:6px">${d.name}</div>` : '';
+        card.innerHTML = `${who}<div>${(d.text||'').replace(/\n/g,'<br>')}</div>`;
+        responsesEl.appendChild(card);
+      });
+      submittedEl.textContent = String(docs.length);
+      const pct = expectedCount ? Math.min(100, (docs.length/expectedCount)*100) : 0;
+      fillEl.style.width = pct + '%';
+      allDoneEl.style.display = expectedCount && docs.length >= expectedCount ? 'inline-flex' : 'none';
+    });
+  });
+}
+
+async function saveSession(){
+  if (!sessionRef) return alert('Create or load a session first.');
+  expectedCount = Number(expectedEl.value||25);
+  await updateDoc(sessionRef, { expectedCount });
+  expectedOutEl.textContent = expectedCount;
+}
+
+async function startRound(){
+  if (!sessionRef) return alert('Create or load a session first.');
+  const prompt = promptInput.value.trim();
+  if (!prompt) return alert('Enter a prompt first.');
+  const rd = await addDoc(roundsCol, { prompt, createdAt: serverTimestamp() });
+  await updateDoc(sessionRef, { activeRound: rd.id });
+  promptInput.value = '';
+}
+
+async function endRound(){
+  if (!sessionRef) return;
+  await updateDoc(sessionRef, { activeRound: null });
+}
+
+async function exportCSV(){
+  if (!sessionRef) return alert('Create or load a session first.');
+  const rounds = await getDocs(roundsCol);
+  const rows = [["sessionCode","roundId","prompt","submittedAt","studentName","uid","text"]];
+  for (const r of rounds.docs){
+    const rd = r.data();
+    const respCol = collection(r.ref, 'responses');
+    const rs = await getDocs(respCol);
+    rs.forEach(docSnap => {
+      const d = docSnap.data();
+      rows.push([sessionRef.id, r.id, rd.prompt||"", (d.createdAt?.toDate?.()||"").toString(), d.name||"", d.uid||"", (d.text||"").replace(/\n/g,'\\n')]);
+    });
+  }
+  const csv = rows.map(row => row.map(x => `"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `WriteRound_${sessionRef.id}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+const saved = localStorage.getItem('wr_session');
+if (saved) loadSession(saved);
+
+showNamesEl.addEventListener('change', ()=>{
+  if (sessionRef) loadSession(sessionRef.id);
+});
+
+window.newSession = newSession;
+window.saveSession = saveSession;
+window.startRound = startRound;
+window.endRound = endRound;
+window.exportCSV = exportCSV;
+</script>
+</body>
+</html>
